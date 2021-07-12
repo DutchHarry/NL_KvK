@@ -1,0 +1,362 @@
+<#
+20210712 NL_KvK
+
+Kvk stelt geanonimiseerde data beschikbaar:
+Handelsregister: een .CSV bestand
+https://www.kvk.nl/producten-bestellen/koppeling-handelsregister/kvk-handelsregister-open-data-set/
+jaarrekeningen: een XML formaat (XBRL)
+https://www.kvk.nl/producten-bestellen/koppeling-handelsregister/kvk-jaarrekeningen-open-data-set/
+
+Details over het verwerken van deze data vind je ook hier:
+https://dirkmjk.nl/en/187/open-company-data-in-the-netherlands
+with a script here:
+https://gist.github.com/DIRKMJK/4944cd7ddd00f323d8f29fb4e60739d6
+
+
+Daarnaast is beperkt data beschikbaar via een JSON format
+https://zoeken.kvk.nl/JsonSearch.ashx?q=*&start=0
+je krijgt pagina's met maximaal 10 items
+De maximale 'resultscount' schijnt 250000
+Zie bijv.: https://zoeken.kvk.nl/JsonSearch.ashx?q=a&start=0
+
+Waarnaar te zoeken om alles te zien te krijgen?
+Ik ging voor postcodes
+In eerste instantie alle postcodes uit BAG NUM
+Daarna een lijst van postcodes van Postbus nummers
+Daarna alle mogelijke postcodes gegenereerd van het numerieke deel van postbus postcodes 
+En tenslotte nog onbekende postcodes welke daarna nog opdoken in de extracten.
+Denk dat dat toch bijna dekkend zou zijn, maar weet zeker dat er nog wel een paar ontbreken
+
+Aanpak:
+1. Zet wat postcodes in een bestand (hier: pc1.csv)
+2. Loop door dit bestand en loop door de pagina's als er meer dan 1 gevonden gevonden wordt
+3. Het breekt onherroepelijk, nog geen idee warom, maar vermoed geretourneerde foutcodes van de server
+   Dus zet het geheel in een loop die het proces automatisch herstart
+4. Vervang de komma op positie 1 in de bestanden door '[' en plak er aan het eind een ']' zodat je een valid JSON format hebt.
+5. Importeer, gooi de onvermijdelijke duplicaten eruit, en analyseer ...
+#>
+
+	$batchcounter = 1  # omextracten te splitsen over meerdere bestanden
+	$inputfile="pc1.csv"
+	$outputdir="s:\_ue\kvk\"
+	$outputfile = "$inputfile"+"_DATA"+"$batchcounter"+".JSON"
+
+	$scrapesize = 100
+	$batchsize = 250
+	$batchnumber = 0
+	$cookierefreshsize=10
+	$sessioncounter = 0
+	#change window title
+	$host.ui.RawUI.WindowTitle = "Getting KvK from $inputfile"
+	$alldata = $null
+
+For(;;) { # begin for loop 0
+  # ending loop
+  if ($pc -eq $null){Return}
+
+	#for restarts
+	#$pcbreak = $pc
+	#$justrestarted = $false
+
+	$reader = New-Object System.IO.StreamReader("$outputdir$inputfile")
+
+	try { # 1st try
+	    For(;;) { # begin for loop 1
+
+	        #$pc = "6000AG"
+	        #$pc = "0111KH"
+	        $pc = $reader.ReadLine()
+	 		    if ($pc -eq $null){Return}
+		      if ($justrestarted -eq $true) {
+		        if ($pc -ne $pcbreak){
+		          continue
+	#	          Write-Host "Restarted"
+		        }else{
+		          $justrestarted = $false
+	#	          Write-Host "Restarted : false"
+		        }
+		      }else{
+		        #
+		      }
+
+	        $kvkurl = "https://zoeken.kvk.nl/JsonSearch.ashx?q=$pc&?start=0"
+
+	        $useragent = "sometimesbrowse1"
+		      
+	        $whereami = "before cookie refresh"
+
+		      # refresh websession cookies
+		      if ($sessioncounter -eq $cookierefreshsize) {
+		  			$ProgressPreference = 'SilentlyContinue'    # Subsequent calls do not display UI.
+			        $webrequest = Invoke-WebRequest -Uri $kvkurl -SessionVariable websession -Useragent $useragent
+		  			$ProgressPreference = 'Continue'            # Subsequent calls do display UI.
+		        $sessioncounter = 0
+		      }else{
+		        $sessioncounter++
+		      }
+
+	        $whereami = "after cookie refresh"
+
+	        $kvkdata = Invoke-RestMethod -Uri $kvkurl -ContentType "application/json" -WebSession $websession -Useragent $useragent
+	        $ResultsCount = $kvkdata.pageinfo.resultscount
+	        $Extractiondate=Get-Date -format "dd-MMM-yyyy HH:mm:ss"
+	        $i=0
+
+	        $whereami = "before pc loop"
+
+  	      $alldata = $alldata + ',{"pc":"' + "$pc" + '",' + '"ExtractionDate":"' + "$Extractiondate" + '",' + '"data":[' + ($kvkdata.entries | ConvertTo-Json -Depth 100 -Compress) + ']}'
+	        
+	        $whereami = "before pc loop"
+	        
+	        If ([math]::Floor($kvkdata.pageinfo.resultscount/10) -eq 0){
+	          # do nothing
+	        }else{
+	          # process other pages
+	            For ($i=1; $i -le [math]::Floor($kvkdata.pageinfo.resultscount/10); $i++ ){
+	              $j=0
+	              $j=$i*10
+	              $kvkurl=$null
+	              $kvkurl = "https://zoeken.kvk.nl/JsonSearch.ashx?q=$pc&start=$j"
+	              $kvkdata=$null
+	              $kvkdata = Invoke-RestMethod -Uri $kvkurl -ContentType "application/json" -WebSession $websession -Useragent $useragent
+	              $alldata = $alldata + ',{"pc":"' + "$pc" + '",' + '"ExtractionDate":"' + "$Extractiondate" + '",' + '"data":[' + ($kvkdata.entries | ConvertTo-Json -Depth 100 -Compress) + ']}'
+	            }
+
+	            $whereami = "after pc loop"
+
+				      # intermediate saving after 100
+				      if ($scrapingcounter -eq $scrapesize) {
+				        $whereami = "intermediate saving inside"
+				        Add-Content $outputfile "$alldata"
+				        $alldata = $null
+				        $scrapingcounter = 1
+				        $batchnumber++
+				      }else{
+				        $scrapingcounter++
+				      }
+				      $whereami = "after intermediate saving inside"
+
+				      # check batch
+				      If ($batchnumber -eq $batchsize){
+				        $whereami = "check batch inside"
+				        # open new file
+				        $batchcounter++
+				        $outputfile = "$inputfile"+"_DATA"+"$batchcounter"+".JSON"
+				        $batchnumber = 0
+				      }else{
+				        #
+				      }
+				      $whereami = "after check batch"
+	      
+	      WrIte-Host "$pc" # Note: geeft alleen indicatie voor postcodes waar ook wat data gevonden werd
+
+	    }
+	  }
+	}catch{ # 1st try
+	  $justrestarted = $true
+	  $pcprevious = $pc
+	  $pcbreak = $pcprevious  # ga 1 pc terug zodat je zekere de volledige postcode meepakt
+	  Write-Host "catch in 1st for loop"
+	  Write-Host "PC = $pc"
+	  Write-Host "whereami = $whereami"
+	}finally{ # 1st finally
+	  Add-Content $outputfile "$alldata"
+	} # end of 1st try
+
+}
+
+$reader.Close()
+$reader = $null
+# garbage collector
+[GC]::Collect()
+
+
+
+<#
+/*
+creeer een database KvK
+en run scripts hieronder
+*/
+
+USE KvK;
+GO
+
+/*
+CREATE TABLE [Tbl_KvK_JSON_staging] (
+  [hID] [int] IDENTITY(1,1) NOT NULL
+, [StringLength]  AS (len([data])) PERSISTED
+, [StringHash] AS (CONVERT([varchar](32),hashbytes('MD5',[data]),(2))) PERSISTED
+, [pc] varchar(100) NULL
+, [ExtractionFileDate] datetime NULL
+, [ExtractionFileName] varchar(255) NULL
+, [ExtractionDate] datetime NULL
+, [data] nvarchar(max) NULL
+)
+;
+CREATE OR ALTER   VIEW [Vw_KvK_JSON_staging] AS 
+SELECT
+  [ExtractionFileDate]
+, [ExtractionFileName]
+, [ExtractionDate]
+, [pc]
+, [data]
+FROM [Tbl_KvK_JSON_staging];
+GO
+*/
+
+-- import json files
+DECLARE @ExtractionFileName varchar(255) = '';
+DECLARE @ExtractionFileDate varchar(255) = '';
+DECLARE @filedir varchar(1000) = 'D:\NLDATA\KvK\KvK_JSON\toload\';  --<-- CHANGE!!!
+DECLARE @ExtractionFileDirectory varchar(255) = @filedir;
+DECLARE @tablename varchar(1000) = 'Vw_KvK_JSON_staging';
+DECLARE @sql nvarchar(max) ='';
+DECLARE @debug varchar(5) = 'Y'; --Y,I,N
+DECLARE @quote varchar(5)= '''';
+DECLARE @crlf varchar(5) = CHAR(13)+CHAR(10);
+DECLARE @msg varchar(8000) = '';
+DECLARE @doscommand varchar(8000);
+DECLARE @result int; 
+
+
+-- BEGIN get dir into table
+DROP TABLE IF EXISTS #CommandShell;
+CREATE TABLE #CommandShell ( Line VARCHAR(512));
+SET @doscommand = 'dir "'+@filedir+ '" /TC';
+--PRINT @doscommand;
+INSERT INTO #CommandShell
+EXEC @result = MASTER..xp_cmdshell   @doscommand ;
+IF (@result = 0)  
+   PRINT 'Success'  
+ELSE  
+   PRINT 'Failure'  
+;
+DELETE
+FROM   #CommandShell
+WHERE  Line NOT LIKE '[0-9][0-9]/[0-9][0-9]/[0-9][0-9][0-9][0-9] %'
+OR Line LIKE '%<DIR>%'
+OR Line is null
+;
+-- END get dir into table
+DECLARE kvk_json_file CURSOR 
+  FAST_FORWARD
+  FOR 
+  SELECT
+    ExtractionFileDate = FORMAT(CONVERT(DATETIME2,LEFT(Line,17)+':00',103), 'dd-MMM-yyyy HH:mm:ss')
+  , ExtractionFileName = REVERSE( LEFT(REVERSE(Line),CHARINDEX(' ',REVERSE(line))-1 ) )
+  FROM #CommandShell
+  ORDER BY 
+    ExtractionFileName
+OPEN kvk_json_file  
+FETCH NEXT FROM kvk_json_file
+INTO @ExtractionFileDate, @ExtractionFileName; 
+WHILE @@FETCH_STATUS = 0  
+BEGIN  
+  PRINT @ExtractionFileName;
+
+  --BEGIN DO SOMETHING WITHIN CURSOR
+
+	--BEGIN JSON FILE PROCESSING
+SET @sql = '
+INSERT INTO ['+@tablename+']
+SELECT 
+      '+@quote+@ExtractionFileDate+@quote+'
+    , '+@quote+@ExtractionFileName+@quote+'
+    , kvk.*
+	FROM OPENROWSET (BULK '+@quote+@ExtractionFileDirectory+@ExtractionFileName+@quote+', SINGLE_CLOB) as j
+	CROSS APPLY OPENJSON(BulkColumn )
+	WITH( 
+	  [ExtractionDate] varchar(8000) '+@quote+'$.ExtractionDate'+@quote+'
+	, [pc] varchar(8000) '+@quote+'$.pc'+@quote+'
+	, [data] nvarchar(max) AS JSON
+) AS kvk
+WHERE 1=1
+;
+'
+IF @debug = 'Y' 
+		  BEGIN
+      SET @msg = @sql
+			IF LEN(@msg) > 2047
+			  PRINT @msg;
+			ELSE
+			  RAISERROR (@msg, 0, 1) WITH NOWAIT; 
+		  END;
+      EXEC (@sql);
+
+	--END JSON FILE PROCESSING
+
+  --END   DO SOMETHING WITHIN CURSOR
+  FETCH NEXT FROM kvk_json_file   
+    INTO @ExtractionFileDate, @ExtractionFileName;
+END   
+CLOSE kvk_json_file;  
+DEALLOCATE kvk_json_file;  
+
+-- drop directory table
+DROP TABLE IF EXISTS #CommandShell;
+PRINT 'ALL KVK JSON LOADED';
+
+-- delete hash duplcate data, keep last ExtractionDate
+;WITH cte0 AS (
+SELECT 
+RN = ROW_NUMBER() OVER (PARTITION BY [pc], [StringHash] ORDER BY [pc], [StringHash], [ExtractionDate] desc)
+, t1.*
+FROM [Tbl_KvK_JSON_staging] t1
+)
+DELETE
+FROM cte0
+WHERE 1=1
+AND RN > 1
+;
+
+
+CREATE OR ALTER VIEW [dbo].[Vw_KvK_JSON_staging_details] AS
+SELECT 
+--  k.[hID]
+--, k.[StringLength]
+--, k.[StringHash]
+--, k.[pc]
+--, k.[ExtractionFileDate]
+--, k.[ExtractionFileName]
+--, k.[ExtractionDate]
+--, k.[data]
+--, kvk1.*
+--, kvk2.*
+ kvk3.*
+--, kvk4.*
+FROM [Tbl_KvK_JSON_staging] k
+CROSS APPLY OPENJSON(k.[data]) 
+WITH (
+  [q1] NVARCHAR(MAX) '$' AS JSON
+) AS kvk1
+CROSS APPLY OPENJSON(kvk1.[q1]) 
+WITH (
+  [q2] NVARCHAR(MAX) '$' AS JSON
+) AS kvk2
+CROSS APPLY OPENJSON(kvk2.[q2]) 
+WITH (
+  [href] NVARCHAR(MAX) '$.href' 
+, [handelsnaam] NVARCHAR(MAX) '$.handelsnaam'
+, [meerinfo] NVARCHAR(MAX) '$.meerinfo' AS JSON
+, [dossiernummer] NVARCHAR(MAX) '$.dossiernummer'
+, [subdossiernummer] NVARCHAR(MAX) '$.subdossiernummer'
+, [vestigingsnummer] NVARCHAR(MAX) '$.vestigingsnummer'
+, [straat] NVARCHAR(MAX) '$.straat'
+, [huisnummer] NVARCHAR(MAX) '$.huisnummer'
+, [huisnummertoevoeging] NVARCHAR(MAX) '$.huisnummertoevoeging'
+, [postcode] NVARCHAR(MAX) '$.postcode'
+, [plaats] NVARCHAR(MAX) '$.plaats'
+, [snippet] NVARCHAR(MAX) '$.snippet'
+, [type] NVARCHAR(MAX) '$.type'
+, [actief] NVARCHAR(MAX) '$.actief'
+, [status] NVARCHAR(MAX) '$.status'
+) AS kvk3
+--CROSS APPLY OPENJSON(kvk3.[meerinfo]) 
+--WITH (
+--  [titel] NVARCHAR(MAX) '$.titel'
+--, [tekst] NVARCHAR(MAX) '$.tekst'
+--) AS kvk4
+GO
+
+
+#>
